@@ -110,8 +110,10 @@ bounded-queue gateway. Prefer measured replicas over assuming TP accelerates
 small models. If sharing GPU 2 is unstable, precompute CV and run it in a
 separate phase. Do not run quality and throughput allocations together.
 
-Implement a separate `compose.ogmemory.yaml` entry point, not an automatically
-merged override, to keep the existing baseline intact. Proposed services:
+Deployment layout update (2026-10-19): the only active entry point is the
+root `compose.yaml`. The former nested stack has been consolidated there.
+This planning document's remaining worker/quality ideas are not implemented
+services; use the root README for actual startup commands. Service scope:
 
 - `omni`: OpenAI-compatible chat, host loopback port 8000.
 - `embeddings`: OpenAI-compatible embeddings, host loopback port 8001.

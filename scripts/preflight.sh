@@ -12,7 +12,7 @@ if (( count < 4 )); then
   exit 1
 fi
 nvidia-smi topo -m
-docker compose --profile compare config --quiet
+python3 scripts/preflight.py
 echo "Host checks passed. Next test CUDA inside the exact serving image:"
 echo "docker compose run --rm --no-deps --entrypoint python3 omni -c 'import torch; print(torch.cuda.get_device_name(0)); print(torch.ones(1, device=\"cuda\"))'"
 echo "This script does not install drivers or change host configuration."

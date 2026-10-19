@@ -1,252 +1,200 @@
-# Small Omni + embeddings on four Tesla T4 GPUs
+# oGMemory 多模态 GPU 实验部署
 
-## Recommendation and scope
+检查日期：2026-10-19。重启后已恢复 GPU/Docker 访问，并完成镜像构建、
+模型下载和服务启动。实际验收范围及日志见
+`results/gpu-validation-2026-10-19-post-reboot/`；启动成功不代表完整基准通过。
+本目录是独立 Compose 项目，不修改原有数据库或现有部署。
 
-Start with **Qwen2.5-Omni-3B on one T4 and BGE-M3 on another**. After that
-passes representative multimodal requests, optionally use the remaining two
-cards for **Qwen2.5-Omni-7B**, tensor-parallel across two GPUs. This provides a
-small baseline and a larger comparison without stopping the embedding service.
+## 资源计划
 
-This is a deployment candidate, **not a GPU-validated configuration**.
-In the preparation environment, `nvidia-smi` could not communicate with the
-driver and outbound DNS failed. Image availability, container CLI compatibility,
-CUDA execution, model loading and VRAM fit must therefore pass the steps below
-on the actual GPU host. The supplied versions are conservative compatibility
-candidates, not claims about the latest releases or production security support.
+重启后实测四张 Tesla T4（每张 15360 MiB），驱动 580.178.04，
+Docker NVIDIA runtime 可用。GPU 0、2、3 通过容器 CUDA 矩阵运算；
+GPU 1 通过 BGE-M3 实际向量推理。分配使用 `.env` 中的 GPU 索引或 UUID，推荐 UUID。
+原准备阶段的设备和 Docker 权限阻塞已解除。
 
-**Which M3?** The benchmark repository/paper was not supplied. BGE-M3 is an
-embedding model; it is not itself the requested benchmark. These files provide
-generic OpenAI-style chat and embedding endpoints, not an M3 runner, dataset,
-scoring implementation or a guarantee of compatibility with a particular M3.
-Provide the benchmark URL and required modalities to finalize the adapter.
-
-### Proposed GPU allocation
-
-| GPU | Service | Model | Host endpoint |
+| 物理 GPU | 第一阶段任务 | 对外接口 | 策略 |
 |---|---|---|---|
-| 0 | `omni` | Qwen/Qwen2.5-Omni-3B | `http://127.0.0.1:8000/v1` |
-| 1 | `embeddings` | BAAI/bge-m3 | `http://127.0.0.1:8001/v1` |
-| 2–3 | optional `omni-7b` | Qwen/Qwen2.5-Omni-7B, TP=2 | `http://127.0.0.1:8002/v1` |
+| 0 | Qwen2.5-Omni-3B：图像、音频、文本理解 | `127.0.0.1:8000/v1` | FP16，单并发，显存利用率参数 0.88 |
+| 1 | BGE-M3：文本向量 | `127.0.0.1:8001/v1` | 1024 维；不是原始图像/音频向量 |
+| 2 | InsightFace buffalo_l：人脸检测及身份向量 | `127.0.0.1:18081` | 512 维，要求 ONNX 会话首选 CUDA |
+| 3 | 预留 ASR、说话人分离和声纹提取 | 暂无容器 | Whisper → pyannote → ECAPA 串行；后续集成 |
 
-Assumes nominal 16 GB T4 cards, with no other GPU consumers. Four separate cards
-are not one pooled 64 GB GPU. Parameter-count-only FP16 weight estimates are
-roughly 6 GB for 3B and 14 GB for 7B; these **exclude** multimodal encoders,
-activations, KV cache, CUDA/runtime allocations and loading peaks. They are not
-memory guarantees. The embedding model is much smaller; a dedicated card keeps
-its memory and latency independent during benchmarking.
+这里只实现前三项的部署定义。GPU 3 **仅预留**，`.env` 中 AUDIO_GPU 不会启动服务。
+四张卡不是一张统一大显存卡；Compose 设备选择也不是显存配额。
+先用 `nvidia-smi` 核对 UUID、占用、驱动，不抢占已有任务。
 
-T4 is a Turing GPU. This configuration avoids BF16 and FlashAttention-2:
+第二阶段可以先停掉第一阶段服务，再测试 Omni-7B 占 GPU 0–1、
+embedding 在 GPU 2、音频在 GPU 3；人脸结果提前预计算。
+该阶段尚未提供可直接启动的 Compose 配置，不要同时运行两种分配。
 
-- Omni uses FP16, vLLM's legacy V0 engine, XFormers attention, eager execution,
-  one sequence at a time, and a 4,096-token total context budget.
-- The embedding service uses the separate TEI `turing` image, FP16 and
-  `USE_FLASH_ATTENTION=False`. Turing support has historically been experimental;
-  validate the selected tag before relying on it.
-- The 7B service disables custom all-reduce and uses ordinary NCCL collectives.
-  Two-card PCIe communication can make it slower; do not infer speedup from TP.
-- These settings still need an actual multimodal startup test: selecting an
-  attention backend does not prove every model-specific encoder kernel works.
+## 唯一部署入口：工作区根目录
 
-### What these services do / do not do
-
-- **Omni:** text, image and audio input with **text output** through vLLM's
-  Thinker path. This is not a speech synthesis or streaming speech deployment.
-  The default allows one image and one audio item per request. Test short WAV/MP3
-  clips first (for example, 5–10 seconds) and small images.
-- **Video:** off by default (`VIDEO_LIMIT=0`) to constrain profiling and memory.
-  Set `VIDEO_LIMIT=1` and recreate the Omni service only if your benchmark needs
-  video. Validate your pinned vLLM video request format and explicitly bound
-  duration/frame sampling in the benchmark client. Image pixel limits do not
-  bound audio duration or video frame count. Video is not covered by the script.
-- **BGE-M3:** dense, normalized, 1,024-dimensional **text** vectors with CLS
-  pooling. The model has an 8,192-token input limit; limits are tokenizer tokens,
-  not characters. No silent truncation is enabled here. TEI batching is deliberately
-  conservative. This endpoint does not expose BGE-M3 sparse or ColBERT outputs,
-  nor joint image/audio/video embeddings.
-- If M3 requires multimodal retrieval vectors, speech output, long video or
-  longer contexts, **this baseline is insufficient without changes**.
-- Check the exact model revision's license and use restrictions before use.
-  In particular, treat the Omni-3B research-license terms separately from the
-  7B model's terms; this repository does not grant rights to any weights.
-
-## Deployment plan
-
-### 1. Verify the host
-
-Install a compatible NVIDIA driver, Docker Engine, Docker Compose with GPU
-device reservations, and NVIDIA Container Toolkit using their official host
-installation procedures. Do not install drivers inside these containers.
-The driver must support the CUDA runtime in **both selected images**. A CUDA
-toolkit installed on the host is not a replacement for a functioning driver.
-
-Budget roughly 100 GB of free disk for images, cached models and headroom,
-and preferably at least 32 GB host RAM (64 GB or more for loading all services).
-These are planning budgets, not measured minima. Confirm internet access to
-Docker Hub, GHCR and Hugging Face, or preload images and model caches offline.
-
-```bash
-cp .env.example .env
-python3 -c 'import secrets; print(secrets.token_hex(32))'
-# Put the generated value in .env as API_KEY; optionally set HF_TOKEN.
-chmod 600 .env
-bash scripts/preflight.sh
-```
-
-The preflight intentionally fails if Docker or host GPU access is unavailable.
-It does not fix or alter the host. Run it in a shell with Docker permissions.
-Inspect `nvidia-smi topo -m` when choosing the two 7B GPUs.
-
-### 2. Pull and verify the actual serving images
-
-```bash
-docker compose pull omni embeddings
-docker compose run --rm --no-deps --entrypoint python3 omni -c \
-  'import torch; print(torch.cuda.get_device_name(0)); print(torch.cuda.get_device_capability(0)); print(torch.ones(1, device="cuda"))'
-docker compose run --rm --no-deps omni --help
-docker compose run --rm --no-deps embeddings --help
-```
-
-Check for a T4 with capability `(7, 5)`, a successfully allocated CUDA tensor,
-and support for the supplied CLI options. If a selected image tag is unavailable
-or its options differ, stop and inspect the official version documentation;
-do not silently substitute `latest`. Newer vLLM releases may not retain the
-legacy engine/backend combination this plan uses.
-
-### 3. Start the small baseline
-
-```bash
-docker compose up -d omni embeddings
-docker compose logs -f --tail=100 omni embeddings
-```
-
-Initial downloads and startup profiling may take a long time. The Omni service
-has a long startup health-check grace period. TEI readiness is checked by the
-real embedding request below, not by an image-dependent `curl` health check.
-Restart is disabled intentionally: a failed model load should remain visible,
-not loop repeatedly.
-
-In another shell, export only the key needed by the client:
-
-```bash
-export API_KEY='the-same-key-you-put-in-.env'
-python3 scripts/smoke_test.py
-python3 scripts/smoke_test.py --image /path/to/small.jpg --audio /path/to/short.wav
-```
-
-The first call verifies text output and vector shape/normalization. The second
-also sends image-only, audio-only and combined image/audio requests. Nonempty
-responses are not proof of correct perception: inspect them, then run your
-benchmark's own known-answer samples. `.env` is read by Compose; Python does
-**not** automatically load it.
-
-### 4. Add the optional 7B comparison
-
-```bash
-docker compose --profile compare pull omni-7b
-docker compose --profile compare up -d omni-7b
-docker compose logs -f --tail=100 omni-7b
-python3 scripts/smoke_test.py \
-  --omni-url http://127.0.0.1:8002 --model omni-7b \
-  --image /path/to/small.jpg --audio /path/to/short.wav
-```
-
-Watch `nvidia-smi` during startup and representative longest requests. Start
-benchmark concurrency at **one**; increase only after measuring peak memory
-and latency. Do not run the two comparison benchmarks concurrently when
-collecting clean latency measurements (they still share CPU, disk and PCIe).
-
-### 5. Wire up the actual M3 benchmark
-
-Map the benchmark's configuration to these values; **these are connection
-settings, not asserted M3 configuration key names**:
-
-| Setting | Small baseline | Larger comparison |
-|---|---|---|
-| Chat base URL | `http://127.0.0.1:8000/v1` | `http://127.0.0.1:8002/v1` |
-| Chat model name | `omni-3b` | `omni-7b` |
-| Embedding base URL | `http://127.0.0.1:8001/v1` | same |
-| Embedding model name | `BAAI/bge-m3` | same |
-| API key | value from `.env` | same |
-| Embedding dimension | 1024 | 1024 |
-
-If the benchmark is a container attached to the Compose network, use
-`http://omni:8000/v1`, `http://omni-7b:8000/v1`, and
-`http://embeddings:80/v1` instead; `localhost` inside that container is itself.
-
-Before a scored run:
-
-1. Obtain the exact benchmark repository/commit, dataset/version, license,
-   evaluation split, prompts, metrics, and required input/output modalities.
-2. Check whether the embedding model is prescribed. If it is, replacing it
-   with BGE-M3 changes the experiment. Rebuild indexes when changing models.
-3. Verify context lengths, media limits, truncation policy and audio/video
-   synchronization requirements. A 4K context includes input and generated
-   tokens, not just the text question.
-4. Pin Hugging Face commit IDs in the `*_REVISION` variables and replace image
-   tags with tested digests. Recreate services after pinning.
-5. Record GPU/driver information, image digests, model revisions, benchmark
-   commit, sampling settings and media preprocessing. Record cold-start and
-   warmed-up performance separately; record latency, throughput and peak VRAM.
-6. Run a tiny correctness subset before the complete benchmark. Save raw
-   responses alongside scoring results so format failures remain visible.
-
-Do not publish `docker compose config` output unredacted: it contains secrets.
-
-## Operations and troubleshooting
-
-- Host `nvidia-smi` failure: repair host GPU visibility/driver first, or repeat
-  from the real host if this shell is an unprivileged container.
-- Host GPUs work but container CUDA fails: check NVIDIA Container Toolkit,
-  Docker runtime configuration and driver/runtime compatibility.
-- BF16 / FlashAttention errors: verify FP16, V0 and XFormers settings actually
-  took effect. Encoder-specific failures may require another tested version;
-  do not assume changing only the text attention setting fixes them.
-- Omni out of memory: keep concurrency at one, reduce media size/duration,
-  disable video and try `OMNI_CONTEXT=2048`. Reducing the memory utilization
-  fraction mainly reduces the cache budget; it cannot make model weights fit.
-  If 3B still cannot fit, allocate two free GPUs to its device reservation and
-  add `--tensor-parallel-size 2` / `--disable-custom-all-reduce`, with the 7B
-  profile stopped. That is a manual alternative, not an included auto-fallback.
-- TEI errors/OOM: inspect startup and token-length errors, check CLS pooling,
-  keep small batches, and validate the Turing image. Do not silently truncate
-  benchmark inputs to make requests pass.
-- NCCL failure on 7B: check that both assigned cards are visible and inspect
-  the PCIe topology and logs before adjusting NCCL settings.
-- `docker compose --profile compare down` stops/removes all services but
-  preserves cached models. Adding `-v` deletes the named caches.
-
-Ports bind only to loopback and services require an API key. For remote access,
-use an SSH tunnel rather than exposing plain HTTP; terminate TLS and add access
-controls if deliberately serving beyond localhost. Images run third-party code:
-review and scan the selected versions before production use.
-
-## Local validation
-
-These commands need no GPU and do not download models:
-
-```bash
-docker compose --env-file .env.example --profile compare config --quiet
-bash -n scripts/preflight.sh
-python3 -m unittest discover -s tests -v
-python3 scripts/smoke_test.py --help
-```
-
-They validate YAML interpolation and local helper behavior only. Successful
-image pulls, startup, endpoint smoke tests and an actual M3 run remain separate
-acceptance gates.
-
-## Official references to check on the deployment host
-
-Online verification was unavailable during preparation. These are reference
-locations, not evidence that the supplied image/model combination was tested:
+所有命令均从 `/home/yuanjian/Development/deploy-llm-on-gpu` 执行。
+原内层 `ogmemory-gpu/` 已合并到根目录，不再维护第二套 Compose 或环境配置。
 
 ```text
-https://huggingface.co/Qwen/Qwen2.5-Omni-3B
-https://huggingface.co/Qwen/Qwen2.5-Omni-7B
-https://github.com/QwenLM/Qwen2.5-Omni
-https://huggingface.co/BAAI/bge-m3
-https://docs.vllm.ai/en/v0.10.2/
-https://github.com/huggingface/text-embeddings-inference
-https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
-https://docs.docker.com/compose/how-tos/gpu-support/
+compose.yaml          # 唯一 Compose 入口：omni / embeddings / cv-gpu
+.env                  # 本机密钥和参数，不提交 Git
+.env.example          # 新环境配置模板
+Dockerfile.omni       # vLLM + 音频依赖
+Dockerfile.cv         # InsightFace GPU 镜像
+requirements-cv.txt
+.dockerignore         # 排除密钥、Git、日志及模型验证样本
+scripts/              # preflight.py / preflight.sh / cv_gpu.py / smoke_test.py
+tests/
+results/              # 历史验收记录，不作为当前状态声明
 ```
+
+整理时保留了外层 `.env` 的已有值（包括 API_KEY、HF_TOKEN、上下文和 revision），
+只从内层补齐缺失配置。迁移前两份环境文件备份在
+`results/layout-migration-2026-10-19/`（目录权限 700、文件权限 600）。
+本机旧 `.env` 中未使用的 `OMNI_7B_*`、`VIDEO_LIMIT` 不会启动额外服务。
+旧外层可选 7B 比较配置不再作为部署入口，避免与人脸服务抢占 GPU 2。
+
+项目名保留为 `t4-omni`，以管理当前外层已启动的同名容器；三个模型卷显式命名为
+`ogmemory-gpu_hf-cache`、`ogmemory-gpu_embedding-cache`、`ogmemory-gpu_face-cache`，
+复用此前验收时已下载的模型。旧 `t4-omni_*` 缓存卷不删除。
+`docker compose up -d` 才会将现有容器切换到整理后的配置；移动文件本身不会重启服务。
+不要再从旧路径执行命令，也不要同时启动旧项目。
+
+新机器首次准备（不要覆盖已有 `.env`）：
+
+```bash
+cp -n .env.example .env
+chmod 600 .env
+python3 -c 'import secrets; print(secrets.token_hex(32))'
+# 将生成值填入 API_KEY；核对 OGMEMORY_DIR、GPU、端口及模型 revision。
+```
+
+CV 构建通过只读的额外 build context 复制 oGMemory 的 `scripts/cv_service.py`，
+不修改原仓库或数据库。
+
+### 调用本地模型
+
+`/v1` 是基础地址，聊天请求必须发送到 `/v1/chat/completions`；
+对外模型名为 `omni-3b`，不是模型仓库名称。
+
+```bash
+export API_KEY="$(sed -n 's/^API_KEY=//p' .env)"
+curl --fail-with-body http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${API_KEY}" \
+  -d '{"model":"omni-3b","messages":[{"role":"user","content":"你好"}],"max_tokens":128}'
+python3 scripts/smoke_test.py
+```
+
+预检要求随机 API_KEY 至少 32 字符。如果现有密钥较短，预检会报错，
+但目录整理不会擅自替换密钥；请自行更改 `.env` 并同步客户端后再重建服务。
+
+## 宿主机启动步骤
+
+镜像与依赖不是“最新版本”的声明；本机验证范围以验收日志为准。
+特别核对 Omni-3B 和 InsightFace 预训练权重的使用范围，不默认允许商业用途。
+
+```bash
+python3 scripts/preflight.py
+# 此检查只读配置、Docker 与 GPU 清单；不会创建容器或修改驱动。
+
+docker compose pull embeddings
+docker compose build omni cv-gpu
+
+# 先验证每张卡上的实际 CUDA，而不只是镜像能拉取。
+docker compose run --rm --no-deps --entrypoint python3 omni \
+  -c 'import torch; print(torch.cuda.get_device_name(0)); print(torch.ones(1, device="cuda"))'
+docker compose run --rm --no-deps --entrypoint python cv-gpu \
+  -c 'import torch; import onnxruntime as o; print(torch.ones(1,device="cuda")); print(o.get_available_providers())'
+
+# 分阶段启动，便于定位显存/模型兼容性问题。
+docker compose up -d omni embeddings
+docker compose logs --tail=100 -f omni embeddings
+# 两个端点就绪后再启动人脸服务。
+docker compose up -d cv-gpu
+docker compose ps
+curl --fail http://127.0.0.1:18081/health/gpu
+```
+
+实际模型下载可能较慢。CV 启动器会校验检测和识别模型的真实 ONNX session
+provider，发现 CPU 回退就失败；它不保证每个 ONNX 节点均在 GPU 上执行。
+物体检测和姿态接口明确返回 501，避免把原占位接口的空列表当作实验结果。
+人脸服务无认证，仅绑定宿主机 loopback，不要改为公网监听。
+模型端点带 API key，也仅绑定 loopback。命名卷保存下载缓存。
+
+TEI 未假定内置 curl/Python，因此未配置依赖这些工具的容器健康检查；
+必须通过 `/v1/embeddings` 的实际请求验证就绪。
+
+### 本机部署修复与日常操作
+
+- Omni 从 `VLLM_IMAGE` 指定的基础镜像构建为 `ogmemory-omni:local`，
+  补充 `librosa==0.11.0`，否则音频输入会返回缺少 `vllm[audio]` 的错误。
+- CV 使用 `onnxruntime-gpu==1.20.2`；重装 `ninja==1.11.1.3` 修复基础镜像的
+  包平台元数据，并通过 `ldconfig` 注册 NVIDIA Python 包的动态库目录。
+  仅导入 torch 不足以保证 ONNX Runtime 找到全部 cuDNN 子库。
+- 首次下载曾发生 BGE 权重下载中断、Omni 第一分片损坏。
+  已补齐缓存、重新下载损坏分片；Omni 三个分片均通过 SHA-256 校验。
+  Omni 禁用 Xet 下载路径。以后若下载中断，应校验文件，不能仅凭文件大小认定完整。
+- 保留原 `restart: 'no'` 策略，**机器重启后不会自动恢复服务**。手动启动：
+  `docker compose up -d`（从工作区根目录执行）。
+- 查看状态：`docker compose ps`。健康检查：
+  `curl --fail http://127.0.0.1:18081/health/gpu`。
+- 模型 API 的密钥保存在本目录权限为 600 的 `.env` 中。
+  上游启动日志可能输出 API key，不要公开原始日志或 `docker compose config` 输出。
+
+## oGMemory 接入与实验边界
+
+基于检查过的 `config/m3/pipelines/video_episodic_full.yaml`、
+`scripts/cv_service.py` 和现有部署方案：
+
+- 顶层 `llm` 以及 `m3.episodic_llm` 使用 OpenAI provider、
+  `http://127.0.0.1:8000/v1`、模型名 `omni-3b` 和新 API_KEY。
+- `m3.qa_llm` 与 `m3.judge_llm` 是独立覆盖项，须显式核对，避免意外请求外部服务。
+  QA 的 tool calling、JSON 输出仍需验证，不能由 `/v1/models` 成功推断。
+- 顶层 `embedding` 和 `m3.embedding` 指向
+  `http://127.0.0.1:8001/v1`，模型 `BAAI/bge-m3`；相关向量维度设为 1024。
+- 设置 `OGMEM_CV_SERVICE_URL=http://127.0.0.1:18081`。
+- 保留现有数据库连接，使用新的实验向量表/集合和运行目录，重新建立索引。
+  即便维度相同，也不要混用旧模型向量。
+- 上述 localhost 地址适用于宿主机进程或现有 host-network 容器；
+  普通 bridge 容器的 localhost 不是宿主机，需另行配置网络和可达地址。
+
+不要覆盖生产 `ogmemory.yaml`，复制一份实验配置后按上述实际字段调整。
+
+### 小负载与完整负载必须区分
+
+本配置默认 4 帧、8192 总上下文、单请求，只是待测的小负载候选，不保证能放进 T4。
+应用的抽帧和 episodic 阶段都要降到最多 4 帧，输出 token 预算先降到 512。
+音频也先用短片段。服务端的帧上限不会自动截断应用请求。
+
+完整流水线默认最多 16 帧、30 秒音频。只有单图、单音频、混合输入均通过后，
+才将 `OMNI_MAX_IMAGES=16`，恢复应用两处帧配置，并用真实输入测上下文和显存峰值。
+不要把小负载结果标为完整基准。遇到上下文不足/OOM，减小输入或调整分阶段方案，
+不要直接增加并发；总上下文必须容纳输入、多模态 token 和输出预算。
+
+音频阶段后续需要显式设置 `voice_asr.params.device`、
+`speaker_diarization.params.device`、`speaker_embedding.params.device` 为 `cuda`，
+将处理进程限制在预留 GPU 上，并补齐其运行环境。pyannote 需授权模型访问。
+当前 Compose **不提供音频 worker**，也不能保证宿主机 Python 已具备这些依赖。
+
+## 验收与回滚
+
+1. 导出与 `.env` 相同的 API_KEY，运行原工作区的端点测试：
+   `python3 /home/yuanjian/Development/deploy-llm-on-gpu/scripts/smoke_test.py --image /path/sample.jpg --audio /path/sample.wav`。
+2. `curl --fail -H 'Content-Type: application/octet-stream' --data-binary @/path/face.jpg http://127.0.0.1:18081/detect/faces`；
+   用确实含脸且允许使用的图片检查非空检测和有限的 512 维向量。
+3. 用隔离数据跑一个视频，确认真实 ASR/声纹、episodic schema、索引、检索与 QA，
+   不把 skipped 或退化算法当成成功。
+4. 再用固定 10 视频测质量、延迟、GPU 峰值、OOM、失败率，之后才增加并发。
+5. 记录镜像 digest、模型 commit、应用代码版本、抽帧参数和独立运行目录。
+   当前 `main` 模型 revision 是可变的，正式实验前固定 commit。
+
+停止模型：`docker compose down`。不要加 `-v`，不要 prune，不操作其他 Compose
+项目。此操作不删除命名缓存卷，也不触碰应用数据库。
+
+## 本地结构与配置检查
+
+```bash
+docker compose --env-file .env.example config --quiet
+python3 -m unittest discover -s tests -v
+bash -n scripts/preflight.sh
+```
+
+上述检查不启动容器、不下载模型；当前运行状态以 `docker compose ps` 和实际请求为准。

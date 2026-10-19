@@ -15,7 +15,7 @@ RUN find /opt/conda/lib/python3.11/site-packages/nvidia -type d -name lib \
     > /etc/ld.so.conf.d/nvidia-python.conf && ldconfig
 # Reuse the actual application's wire contract, without editing its repository.
 COPY --from=ogmemory /scripts/cv_service.py /app/cv_service.py
-COPY cv_gpu.py /app/cv_gpu.py
+COPY scripts/cv_gpu.py /app/cv_gpu.py
 RUN useradd --create-home --uid 10001 cv && mkdir /models && chown cv:cv /models
 USER cv
 EXPOSE 8081
