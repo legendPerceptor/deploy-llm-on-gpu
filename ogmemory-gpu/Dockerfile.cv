@@ -1,0 +1,22 @@
+# Candidate CUDA 12 / cuDNN 9 stack; must pass a real GPU smoke test.
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY requirements-cv.txt .
+RUN python -m pip install --no-cache-dir setuptools==75.6.0 wheel==0.45.1 Cython==3.0.11 numpy==1.26.4 \
+    && python -m pip install --no-cache-dir --force-reinstall ninja==1.11.1.3 \
+    && python -m pip install --no-cache-dir --no-build-isolation -r requirements-cv.txt \
+    && python -m pip check \
+    && python -c "import torch; import onnxruntime; from insightface.app import FaceAnalysis"
+# ORT loads cuDNN sub-libraries dynamically; importing torch alone is insufficient.
+RUN find /opt/conda/lib/python3.11/site-packages/nvidia -type d -name lib \
+    > /etc/ld.so.conf.d/nvidia-python.conf && ldconfig
+# Reuse the actual application's wire contract, without editing its repository.
+COPY --from=ogmemory /scripts/cv_service.py /app/cv_service.py
+COPY cv_gpu.py /app/cv_gpu.py
+RUN useradd --create-home --uid 10001 cv && mkdir /models && chown cv:cv /models
+USER cv
+EXPOSE 8081
+CMD ["python", "/app/cv_gpu.py"]

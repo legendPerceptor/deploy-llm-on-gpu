@@ -1,0 +1,5 @@
+ARG BASE_IMAGE=vllm/vllm-openai:v0.10.2
+FROM ${BASE_IMAGE}
+# The upstream serving image does not include librosa required by audio inputs.
+RUN python3 -m pip install --no-cache-dir librosa==0.11.0 \
+    && python3 -c "import librosa; import soundfile; import torchaudio"

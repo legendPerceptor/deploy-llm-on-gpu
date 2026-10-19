@@ -1,0 +1,158 @@
+# Independent experimental stack; see README.zh.md for validation scope.
+name: ogmemory-gpu
+services:
+  omni:
+    image: ogmemory-omni:local
+    build:
+      context: .
+      dockerfile: Dockerfile.omni
+      args:
+        BASE_IMAGE: ${VLLM_IMAGE:-vllm/vllm-openai:v0.10.2}
+    restart: 'no'
+    shm_size: 8gb
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      VLLM_USE_V1: '0'
+      VLLM_ATTENTION_BACKEND: XFORMERS
+      VLLM_WORKER_MULTIPROC_METHOD: spawn
+      HF_HUB_DISABLE_XET: '1'
+    volumes:
+    - hf-cache:/root/.cache/huggingface
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health',
+        timeout=10)
+      interval: 30s
+      timeout: 15s
+      retries: 10
+      start_period: 20m
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: '3'
+    ports:
+    - 127.0.0.1:${OMNI_PORT:-8000}:8000
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            device_ids:
+            - ${OMNI_GPU:-0}
+            capabilities:
+            - gpu
+    command:
+    - --model
+    - Qwen/Qwen2.5-Omni-3B
+    - --revision
+    - ${OMNI_REVISION:-main}
+    - --served-model-name
+    - omni-3b
+    - --dtype
+    - half
+    - --max-model-len
+    - ${OMNI_CONTEXT:-8192}
+    - --max-num-seqs
+    - '1'
+    - --gpu-memory-utilization
+    - '0.88'
+    - --enforce-eager
+    - --limit-mm-per-prompt
+    - '{"image":${OMNI_MAX_IMAGES:-4},"audio":1,"video":0}'
+    - --mm-processor-kwargs
+    - '{"min_pixels":3136,"max_pixels":200704}'
+    - --api-key
+    - ${API_KEY:?Copy .env.example to .env and set API_KEY}
+  embeddings:
+    image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:turing-1.8}
+    restart: 'no'
+    ports:
+    - 127.0.0.1:${EMBED_PORT:-8001}:80
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      USE_FLASH_ATTENTION: 'False'
+    volumes:
+    - embedding-cache:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            device_ids:
+            - ${EMBED_GPU:-1}
+            capabilities:
+            - gpu
+    command:
+    - --model-id
+    - BAAI/bge-m3
+    - --revision
+    - ${EMBED_REVISION:-main}
+    - --dtype
+    - float16
+    - --pooling
+    - cls
+    - --port
+    - '80'
+    - --max-batch-tokens
+    - '8192'
+    - --max-batch-requests
+    - '1'
+    - --max-client-batch-size
+    - '8'
+    - --max-concurrent-requests
+    - '8'
+    - --api-key
+    - ${API_KEY:?Copy .env.example to .env and set API_KEY}
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: '3'
+  cv-gpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.cv
+      additional_contexts:
+        ogmemory: ${OGMEMORY_DIR:-/home/yuanjian/Development/memory/oGMemory}
+    restart: 'no'
+    ports:
+    - 127.0.0.1:${CV_PORT:-18081}:8081
+    environment:
+      INSIGHTFACE_ROOT: /models
+      OMP_NUM_THREADS: '2'
+      NO_ALBUMENTATIONS_UPDATE: '1'
+    volumes:
+    - face-cache:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            device_ids:
+            - ${CV_GPU:-2}
+            capabilities:
+            - gpu
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health/gpu',
+        timeout=10)
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 10m
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: '3'
+volumes:
+  hf-cache: null
+  embedding-cache: null
+  face-cache: null
