@@ -1,0 +1,41 @@
+# Optional dual-T4 profile; combine with compose.yaml. GPU 1/2 remain unchanged.
+services:
+  omni:
+    volumes:
+    - ./templates/qwen2_5_omni7b_json_tools.jinja:/app/templates/qwen2_5_omni7b_json_tools.jinja:ro
+    deploy:
+      resources:
+        reservations:
+          devices: !override
+          - driver: nvidia
+            device_ids: ["0", "3"]
+            capabilities: [gpu]
+    command:
+    - --model
+    - Qwen/Qwen2.5-Omni-7B
+    - --revision
+    - ae9e1690543ffd5c0221dc27f79834d0294cba00
+    - --served-model-name
+    - omni-7b
+    - --enable-auto-tool-choice
+    - --tool-call-parser
+    - llama3_json
+    - --chat-template
+    - /app/templates/qwen2_5_omni7b_json_tools.jinja
+    - --dtype
+    - half
+    - --max-model-len
+    - '32768'
+    - --max-num-seqs
+    - '1'
+    - --gpu-memory-utilization
+    - '0.92'
+    - --enforce-eager
+    - --limit-mm-per-prompt
+    - '{"image":${OMNI_MAX_IMAGES:-4},"audio":1,"video":0}'
+    - --mm-processor-kwargs
+    - '{"min_pixels":3136,"max_pixels":200704}'
+    - --api-key
+    - ${API_KEY:?Copy .env.example to .env and set API_KEY}
+    - --tensor-parallel-size
+    - '2'

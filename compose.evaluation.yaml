@@ -1,0 +1,53 @@
+# Host-specific evaluation stack; credentials/configs remain Git-ignored.
+# The dedicated database must already exist. This file never creates/drops DBs.
+name: local-memory-evaluation
+services:
+  memory:
+    image: ogmemory:yuanjian-ogmem-local
+    container_name: ogmem_local_text7b_20261022
+    network_mode: host
+    restart: 'no'
+    env_file:
+    - ./results/local-e2e-20261022/private-backups/text-memory-frozen.env
+    volumes:
+    - ../memory/oGMemory/data/local_locomo_text7b_20261022.yaml:/etc/ogmem/config.yaml:ro
+    entrypoint: [/bin/sh, -c]
+    command:
+    - |
+      sed 's/--bind "0.0.0.0:/--bind "127.0.0.1:/' /opt/entrypoint.sh > /tmp/entrypoint-local.sh
+      exec /bin/sh /tmp/entrypoint-local.sh
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4833/api/v1/health', timeout=10)"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: '3'
+  gateway:
+    image: openclaw-ogmemory:yuanjian-openclaw-local
+    container_name: openclaw_local_text7b_20261022
+    network_mode: host
+    restart: 'no'
+    env_file:
+    - ./results/local-e2e-20261022/private-backups/text-gateway-frozen.env
+    volumes:
+    - ../memory/oGMemory/data/local_locomo_text_gateway_frozen_20261022:/home/node/.openclaw
+    command: [gateway]
+    depends_on:
+      memory:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:48545/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: '3'

@@ -1,0 +1,47 @@
+# Standalone experiment. Stop conflicting GPU workloads before starting.
+# Pre-download the pinned official snapshot; model loading is offline-only.
+# This uses layer dispatch across GPUs, NOT vLLM tensor parallel serving.
+name: qwen3-trial
+services:
+  omni:
+    build:
+      context: .
+      dockerfile: Dockerfile.qwen3-trial
+      additional_contexts:
+        wheels: ./results/qwen3-omni-20261022/wheels
+    image: ogmemory-qwen3-trial:local
+    restart: "no"
+    shm_size: 8gb
+    environment:
+      TRIAL_API_KEY: ${API_KEY:?Set API_KEY in .env}
+      HF_HUB_DISABLE_XET: "1"
+      OMP_NUM_THREADS: "4"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+      - .:/work
+    ports:
+      - 127.0.0.1:8003:8000
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0", "1", "2", "3"]
+              capabilities: [gpu]
+    command:
+      - --serve
+      - --gpu-gib
+      - "12"
+      - --result-dir
+      - ${QWEN3_TRIAL_RESULT_DIR:-/work/results/qwen3-omni-20261022}
+    healthcheck:
+      test: ["CMD", "/opt/qwen3/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=10)"]
+      interval: 30s
+      timeout: 15s
+      start_period: 30m
+      retries: 5
+volumes:
+  hf-cache:
+    name: ogmemory-gpu_hf-cache
+    external: true

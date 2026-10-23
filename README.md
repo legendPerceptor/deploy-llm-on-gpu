@@ -1,5 +1,102 @@
 # oGMemory 多模态 GPU 实验部署
 
+## 2026-10-23：完整视频对照状态
+
+- 本机当前 `.env` 使用 `OMNI_MAX_IMAGES=16`；下文 7B 初始部署的 4 图限制是
+  历史配置，`compose.omni7b.yaml` 在未设置变量时仍默认 4 图。
+- Omni-7B 完成过 34 分 5 秒视频的 69 段记忆流水线（含失败片段恢复），
+  但答案质量未通过验收；30B 完成部署可行性、少量多模态诊断和基于旧 7B
+  记忆的 QA 对照，**没有完成 30B 全视频记忆重建**。
+- 同输入 MiniMax 对照最终完成 69 条记忆；QA 为 11/12 有效答案，末题在
+  2048 和独立 8192 输出预算试验中均耗尽 reasoning 预算。
+  两种评委均认为其答案优于 7B，但单样本自动评分不等于可信准确率，
+  也不能将该运行报告为全流程成功。
+- 详细报告在相邻 oGMemory 仓库的
+  `docs/m3_sample1_omni7b_20261022.md`、
+  `docs/m3_minimax_comparison_20261023.md`；30B 部署说明见
+  `QWEN3_OMNI_TRIAL.md`。本仓库的原始结果保留在忽略的 `results/`，
+  凭据、私有配置、模型权重及运行产物不提交。
+
+## 2026-10-22：双卡 Omni-7B 本地验证
+
+新增可选覆盖文件 `compose.omni7b.yaml`，保留下面的 3B 基础配置：
+
+- Omni-7B：GPU **0、3**，FP16、TP=2、32768 上下文、单并发、最多 4 张图。
+- 固定模型 revision：`ae9e1690543ffd5c0221dc27f79834d0294cba00`；
+  五个 safetensors 分片已逐个校验 SHA-256。
+- embedding 仍在 GPU 1，人脸服务仍在 GPU 2，不搬迁或清空数据库/缓存卷。
+- 7B 使用 `llama3_json` 解析器读取实际生成的 JSON 函数调用；
+  专用模板为 `templates/qwen2_5_omni7b_json_tools.jinja`。
+  3B 原来的 Hermes 配置及模板保持不变。已验证 7B 的非流式自动调用和
+  工具结果回传，不能据此保证复杂工具选择或所有流式调用。
+- 原 Hermes 配置下，7B 会输出裸 JSON 而不是结构化工具调用。
+  本机 vLLM 0.10.2 的 `required` 工具输出仍可能出现数组解析 400；
+  oGMemory 对明确的输出协议错误使用已有的严格 JSON 抽取回退。
+  普通文本或 API 健康检查不算工具调用成功。
+
+本机忽略的 `.env` 已加入
+`COMPOSE_FILE=compose.yaml:compose.omni7b.yaml:compose.text7b.yaml`，因此默认
+`docker compose up` 会保留 Omni-7B 和下面的文本侧车。也可以显式启动 Omni：
+
+```bash
+docker compose -f compose.yaml -f compose.omni7b.yaml up -d --no-deps --no-build omni
+set -a; source .env; set +a
+python3 scripts/smoke_test.py --model omni-7b --tools \
+  --image results/gpu-validation-2026-10-19-post-reboot/astronaut.jpg \
+  --audio results/gpu-validation-2026-10-19-post-reboot/tone.wav
+```
+
+回滚模型时显式使用 `docker compose -f compose.yaml up -d --no-deps --no-build omni`，
+并同步应用的模型名、密钥和真实上下文；不能只回滚容器后仍让应用请求 `omni-7b`。
+不要删除命名卷。运行前的私有环境备份在本次结果目录的 `private-backups/`，
+不要公开该目录。
+
+本次完整运行日志、权重校验、GPU 采样及验收报告存放在
+`results/local-e2e-20261022/`。M3 复现说明见 oGMemory 的
+`docs/m3_local_gpu_validation.md`。下面的 10 月 19–20 日内容为历史 3B 验收记录，
+不代表当前运行模型，也不代表完整基准结果。
+
+### 本地文本侧车与 LoCoMo
+
+Omni-only 的 LoCoMo 长会话抽取在 2048/4096 输出预算下均出现截断，
+相关尝试仅保留为失败诊断，不作为完成的基准结果。
+最终文本侧车 `compose.text7b.yaml` 使用
+`Qwen/Qwen2.5-7B-Instruct-AWQ`，固定 revision
+`b25037543e9394b818fdfca67ab2a00ecc7dd641`，两个权重分片已校验 SHA-256。
+它在 GPU 1 与 embedding 共用，端口 `8002`、模型名 `text-7b`、
+32768 上下文、单并发、显存利用率 0.82。实际文本/工具闭环/embedding 联合冒烟通过。
+
+T4 上启用 chunked prefill 曾导致共享内存内核错误（需要 98304 bytes，
+硬件限制 65536），因此该配置关闭了这项优化。0.70 显存利用率不足以同时容纳
+全长 prefill 峰值和 32768 KV cache，最终使用 0.82。这是已测小并发配置，
+不是任意长输入/并发的保证。重新跑 M3 音频时使用 GPU 2，或先停文本侧车，
+不要再把音频 worker 与它同时放在 GPU 1。
+
+本机隔离的最终 LoCoMo 服务定义在 `compose.evaluation.yaml`：
+
+- oGMemory：`127.0.0.1:4833`；网关：`127.0.0.1:48545`。
+- 导入数据库：`ogmem_local_text7b_20261022`；最终冻结 QA 数据库：
+  `ogmem_local_text7b_frozen_20261022`。原数据库不清空，失败尝试保存在另行命名的实验数据库中。
+- 账号 `local-locomo-text7b-20261022`，独立网关状态目录；
+  抽取和回答用 `text-7b`，judge 用本地 `omni-7b`，embedding 用本地 BGE-M3。
+- 配置/凭证引用本次结果目录下的私有 env 文件和 oGMemory 忽略的 YAML，
+  不适合作为无凭证的新机器通用启动配置。
+- 当前网关关闭自动捕获、保留自动检索，使用新的 QA 会话目录。
+  QA 前后记忆节点、向量和归档的哈希保持一致。不要用这个冻结配置重新导入数据。
+
+```bash
+docker compose -f compose.evaluation.yaml config --quiet
+docker compose -f compose.evaluation.yaml up -d
+cd ../memory/locomo-test
+.venv/bin/python -m locomo_test.cli run configs/ogmem-local-text7b-frozen.toml --resume
+```
+
+`--resume` 跳过导入，仅适用于已经确认导入完成的本次结果目录。
+LoCoMo small 原文件有 50 题，现有 runner 排除 category 5 后实际评测 35 题。
+初轮开启捕获的 QA 会把评测问答写回记忆，其结果已排除。最终冻结轮完成 35/35 QA，
+但两个本地评委仍有明确的日期/时间推理误判；原始分数不是可信准确率。
+最终结论、判分分歧和快照哈希见 `results/local-e2e-20261022/VALIDATION_REPORT.md`。
+
 检查日期：2026-10-19。重启后已恢复 GPU/Docker 访问，并完成镜像构建、
 模型下载和服务启动。实际验收范围及日志见
 `results/gpu-validation-2026-10-19-post-reboot/`；启动成功不代表完整基准通过。
@@ -82,6 +179,37 @@ curl --fail-with-body http://127.0.0.1:8000/v1/chat/completions \
   -d '{"model":"omni-3b","messages":[{"role":"user","content":"你好"}],"max_tokens":128}'
 python3 scripts/smoke_test.py
 ```
+
+### 工具调用（tool calling）
+
+Omni 服务显式启用 `--enable-auto-tool-choice --tool-call-parser hermes`，
+并通过只读挂载加载 `templates/qwen2_5_omni_tools.jinja`。
+本机缓存的 Omni-3B 原始模板不处理 `tools` / 历史 `tool_calls`，因此不能只加
+解析器参数。自定义模板保留 Omni 图像、音频和视频占位符，同时加入工具定义、
+`<tool_call>` 和 `<tool_response>` 格式；不要直接换用纯文本模型模板。
+
+应用配置（会短暂中断 Omni，不重建镜像或其他服务）与验收：
+
+```bash
+docker compose up -d --no-deps --no-build omni
+export API_KEY="$(sed -n 's/^API_KEY=//p' .env)"
+python3 scripts/smoke_test.py --tools
+```
+
+客户端在 `/v1/chat/completions` 中提交 `tools` 和 `tool_choice: "auto"`。
+返回 `message.tool_calls` 后由**客户端**执行工具，并将 assistant 消息及
+`role: "tool"`、匹配的 `tool_call_id`、字符串形式的 `content` 回传；
+模型服务不会执行工具。工具须由应用做授权与参数校验。
+
+`--tools` 检查非流式自动调用的函数名、JSON 参数、调用 ID 和工具结果回传后的回答，
+不把普通文本中的工具标签当作成功。该测试不代表复杂工具选择、多工具并行、
+流式调用或完整 QA 基准已通过，也不保证 3B 模型的工具选择质量。
+本地模板单测需要 `jinja2`（服务镜像已包含，本机测试环境也需安装）。
+
+2026-10-20 本机验收：运行中的 vLLM 0.10.2 / Omni-3B 已应用以上配置，
+`--tools` 非流式调用及工具结果回传通过；现有 `astronaut.jpg`、`tone.wav`
+样本的单图、单音频、图像＋音频请求，以及文本和 BGE-M3 embeddings 回归通过。
+13 项本地单测、Compose 配置检查通过。这是小负载冒烟验收，不是完整流水线基准。
 
 预检要求随机 API_KEY 至少 32 字符。如果现有密钥较短，预检会报错，
 但目录整理不会擅自替换密钥；请自行更改 `.env` 并同步客户端后再重建服务。

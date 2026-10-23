@@ -1,0 +1,9 @@
+# Isolated from the existing Qwen2.5/vLLM installation.
+# Supply a "wheels" build context (see compose); the build needs no PyPI access.
+FROM ogmemory-omni:local
+RUN --mount=type=bind,from=wheels,target=/wheels \
+    python3 -m venv --system-site-packages /opt/qwen3 \
+    && /opt/qwen3/bin/pip install --no-cache-dir --no-index --find-links=/wheels \
+       transformers==4.57.6 bitsandbytes==0.48.2 qwen-omni-utils==0.0.8 av==19.0.2
+ENV HF_HUB_DISABLE_XET=1
+ENTRYPOINT ["/opt/qwen3/bin/python", "-u", "/work/scripts/qwen3_omni_trial.py"]

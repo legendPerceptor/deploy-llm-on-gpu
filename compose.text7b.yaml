@@ -1,0 +1,60 @@
+# Optional text-only evaluation model. Shares GPU 1 with the small TEI service.
+name: t4-omni
+services:
+  text:
+    image: ogmemory-omni:local
+    restart: 'no'
+    shm_size: 4gb
+    environment:
+      VLLM_USE_V1: '0'
+      VLLM_ATTENTION_BACKEND: XFORMERS
+      VLLM_WORKER_MULTIPROC_METHOD: spawn
+      HF_HUB_DISABLE_XET: '1'
+    volumes:
+    - hf-cache:/root/.cache/huggingface
+    ports:
+    - 127.0.0.1:8002:8000
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            device_ids: ['1']
+            capabilities: [gpu]
+    command:
+    - --model
+    - Qwen/Qwen2.5-7B-Instruct-AWQ
+    - --revision
+    - b25037543e9394b818fdfca67ab2a00ecc7dd641
+    - --served-model-name
+    - text-7b
+    - --quantization
+    - awq
+    - --dtype
+    - half
+    - --max-model-len
+    - '32768'
+    - --max-num-seqs
+    - '1'
+    - --gpu-memory-utilization
+    - '0.82'
+    - --enforce-eager
+    - --enable-auto-tool-choice
+    - --tool-call-parser
+    - hermes
+    - --api-key
+    - ${API_KEY:?Set API_KEY in .env}
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=10)"]
+      interval: 30s
+      timeout: 15s
+      retries: 10
+      start_period: 10m
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: '3'
+volumes:
+  hf-cache:
+    name: ogmemory-gpu_hf-cache

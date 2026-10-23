@@ -44,6 +44,14 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(Path(build["context"]), project)
             self.assertTrue((project / build["dockerfile"]).is_file())
         self.assertEqual(config["services"]["omni"]["image"], "ogmemory-omni:local")
+        command = config["services"]["omni"]["command"]
+        self.assertIn("--enable-auto-tool-choice", command)
+        self.assertEqual(command[command.index("--tool-call-parser") + 1], "hermes")
+        template = command[command.index("--chat-template") + 1]
+        self.assertTrue(any(
+            volume.get("target") == template and volume.get("read_only")
+            for volume in config["services"]["omni"]["volumes"]
+        ))
         self.assertEqual(config["services"]["cv-gpu"]["image"], "ogmemory-gpu-cv-gpu:latest")
 
     def test_cuda_guard(self):

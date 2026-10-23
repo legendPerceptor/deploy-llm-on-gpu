@@ -18,6 +18,7 @@ services:
       HF_HUB_DISABLE_XET: '1'
     volumes:
     - hf-cache:/root/.cache/huggingface
+    - ./templates/qwen2_5_omni_tools.jinja:/app/templates/qwen2_5_omni_tools.jinja:ro
     healthcheck:
       test:
       - CMD
@@ -52,6 +53,11 @@ services:
     - ${OMNI_REVISION:-main}
     - --served-model-name
     - omni-3b
+    - --enable-auto-tool-choice
+    - --tool-call-parser
+    - hermes
+    - --chat-template
+    - /app/templates/qwen2_5_omni_tools.jinja
     - --dtype
     - half
     - --max-model-len

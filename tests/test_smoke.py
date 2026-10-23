@@ -1,4 +1,5 @@
 import importlib.util
+import copy
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,6 +12,42 @@ spec.loader.exec_module(smoke)
 
 
 class SmokeTests(unittest.TestCase):
+    def tool_response(self):
+        return {"choices": [{"finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": None, "tool_calls": [{
+                "id": "call_test", "type": "function", "function": {
+                    "name": "lookup_test_code",
+                    "arguments": '{"item":"deployment-check"}',
+                },
+            }],
+        }}]}
+
+    def test_tool_call(self):
+        message, call_id = smoke.validate_tool_call(self.tool_response())
+        self.assertEqual(call_id, "call_test")
+        self.assertEqual(message["role"], "assistant")
+
+    def test_invalid_tool_calls(self):
+        good = self.tool_response()
+        invalid = []
+        for field, value in (("name", "wrong"), ("arguments", "not-json"),
+                             ("arguments", '{"item":"wrong"}')):
+            response = copy.deepcopy(good)
+            response["choices"][0]["message"]["tool_calls"][0]["function"][field] = value
+            invalid.append(response)
+        response = copy.deepcopy(good)
+        response["choices"][0]["message"]["tool_calls"][0]["id"] = ""
+        invalid.append(response)
+        response = copy.deepcopy(good)
+        response["choices"][0]["finish_reason"] = "stop"
+        invalid.append(response)
+        response = copy.deepcopy(good)
+        response["choices"][0]["message"]["tool_calls"] = []
+        invalid.append(response)
+        for response in invalid:
+            with self.subTest(response=response), self.assertRaises(ValueError):
+                smoke.validate_tool_call(response)
+
     def test_vectors(self):
         vector = [1 / 32] * 1024
         smoke.validate_embeddings({"data": [

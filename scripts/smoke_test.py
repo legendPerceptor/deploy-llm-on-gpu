@@ -51,6 +51,48 @@ def validate_embeddings(response, count=2):
             raise ValueError(f"Expected normalized embedding; norm={norm}")
 
 
+def validate_tool_call(response):
+    choice = response["choices"][0]
+    calls = choice["message"].get("tool_calls") or []
+    if choice["finish_reason"] != "tool_calls" or len(calls) != 1:
+        raise ValueError("Expected one structured tool call, not plain-text tool markup")
+    call = calls[0]
+    if not call.get("id") or call["type"] != "function":
+        raise ValueError("Expected a function tool call with an ID")
+    function = call["function"]
+    if function["name"] != "lookup_test_code":
+        raise ValueError("Unexpected tool name")
+    if json.loads(function["arguments"]) != {"item": "deployment-check"}:
+        raise ValueError("Unexpected tool arguments")
+    return choice["message"], call["id"]
+
+
+def check_tools(base, key, model):
+    tools = [{"type": "function", "function": {
+        "name": "lookup_test_code",
+        "description": "Look up the secret test code for an item. Never guess the code.",
+        "parameters": {"type": "object", "properties": {
+            "item": {"type": "string"},
+        }, "required": ["item"], "additionalProperties": False},
+    }}]
+    messages = [{"role": "user", "content":
+                 "Use lookup_test_code to look up the code for item deployment-check."}]
+    payload = {"model": model, "messages": messages, "tools": tools,
+               "tool_choice": "auto", "temperature": 0, "max_tokens": 256,
+               "stream": False}
+    result = request(base, "/v1/chat/completions", key, payload)
+    message, call_id = validate_tool_call(result)
+    print("PASS tools: auto returned structured function name, JSON arguments and ID")
+    messages.extend([message, {"role": "tool", "tool_call_id": call_id,
+                              "content": '{"code":"TOOL_RESULT_7391"}'}])
+    # Keep auto enabled to test the natural completion of the tool loop.
+    result = request(base, "/v1/chat/completions", key, payload)
+    answer = result["choices"][0]["message"]
+    if answer.get("tool_calls") or "TOOL_RESULT_7391" not in (answer.get("content") or ""):
+        raise ValueError("Tool round trip did not produce an answer using the tool result")
+    print("PASS tools: assistant consumed the tool result and answered")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--omni-url", default="http://127.0.0.1:8000")
@@ -58,6 +100,8 @@ def main():
     parser.add_argument("--model", default="omni-3b")
     parser.add_argument("--image")
     parser.add_argument("--audio")
+    parser.add_argument("--tools", action="store_true",
+                        help="Check automatic structured tool calls and tool-result round trip.")
     args = parser.parse_args()
     key = os.environ.get("API_KEY")
     if not key:
@@ -89,6 +133,8 @@ def main():
         if not isinstance(text, str) or not text.strip():
             raise ValueError(f"Empty/non-text response for {label}")
         print(f"PASS {label}: {text}")
+    if args.tools:
+        check_tools(args.omni_url, key, args.model)
     result = request(args.embedding_url, "/v1/embeddings", key, {
         "model": "BAAI/bge-m3", "input": ["A small GPU server.", "一台小型 GPU 服务器。"],
         "encoding_format": "float",

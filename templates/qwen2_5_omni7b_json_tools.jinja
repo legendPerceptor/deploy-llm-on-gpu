@@ -1,0 +1,73 @@
+{# Omni-7B media tokens with the JSON function-call protocol (llama3_json parser). #}
+{%- set audio_count = namespace(value=0) -%}
+{%- set image_count = namespace(value=0) -%}
+{%- set video_count = namespace(value=0) -%}
+{%- macro render_content(content) -%}
+    {%- if content is string -%}
+        {{- content -}}
+    {%- elif content -%}
+        {%- for part in content -%}
+            {%- if part['type'] == 'image' or 'image' in part or 'image_url' in part -%}
+                {%- set image_count.value = image_count.value + 1 -%}
+                {%- if add_vision_id %}{{ 'Picture ' ~ image_count.value ~ ': ' }}{% endif -%}
+                {{- '<|vision_bos|><|IMAGE|><|vision_eos|>' -}}
+            {%- elif part['type'] == 'audio' or 'audio' in part or 'audio_url' in part -%}
+                {%- set audio_count.value = audio_count.value + 1 -%}
+                {%- if add_audio_id %}{{ 'Audio ' ~ audio_count.value ~ ': ' }}{% endif -%}
+                {{- '<|audio_bos|><|AUDIO|><|audio_eos|>' -}}
+            {%- elif part['type'] == 'video' or 'video' in part -%}
+                {%- set video_count.value = video_count.value + 1 -%}
+                {%- if add_vision_id %}{{ 'Video ' ~ video_count.value ~ ': ' }}{% endif -%}
+                {{- '<|vision_bos|><|VIDEO|><|vision_eos|>' -}}
+            {%- elif 'text' in part -%}
+                {{- part['text'] -}}
+            {%- endif -%}
+        {%- endfor -%}
+    {%- endif -%}
+{%- endmacro -%}
+{{- '<|im_start|>system\n' -}}
+{%- if messages and messages[0]['role'] == 'system' -%}
+    {{- render_content(messages[0]['content']) -}}
+{%- else -%}
+    {{- 'You are a helpful assistant.' -}}
+{%- endif -%}
+{%- if tools -%}
+    {{- '\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>' -}}
+    {%- for tool in tools -%}
+        {{- '\n' -}}{{- tool | tojson -}}
+    {%- endfor -%}
+    {{- '\n</tools>\n\nWhen invoking a function, output ONLY a JSON object with exactly the keys name and arguments. Example: {"name": "function_name", "arguments": {"argument_name": "value"}}. Do not wrap calls in XML tags or code fences. Do not use Python function-call syntax. For multiple calls, separate JSON objects with a semicolon. Once tool results are available, answer normally or call another function.' -}}
+{%- endif -%}
+{{- '<|im_end|>\n' -}}
+{%- for message in messages -%}
+    {%- if not (loop.first and message['role'] == 'system') -%}
+        {%- if message['role'] == 'tool' -%}
+            {%- if loop.first or messages[loop.index0 - 1]['role'] != 'tool' -%}
+                {{- '<|im_start|>user' -}}
+            {%- endif -%}
+            {{- '\n<tool_response>\n' -}}{{- render_content(message['content']) -}}{{- '\n</tool_response>' -}}
+            {%- if loop.last or messages[loop.index0 + 1]['role'] != 'tool' -%}
+                {{- '<|im_end|>\n' -}}
+            {%- endif -%}
+        {%- else -%}
+            {{- '<|im_start|>' ~ message['role'] ~ '\n' -}}
+            {{- render_content(message['content']) -}}
+            {%- if message['role'] == 'assistant' and message['tool_calls'] is defined -%}
+                {%- for call in message['tool_calls'] -%}
+                    {%- set function = call['function'] if call['function'] is defined else call -%}
+                    {{- ('; ' if not loop.first else '\n') ~ '{"name": ' -}}{{- function['name'] | tojson -}}{{- ', "arguments": ' -}}
+                    {%- if function['arguments'] is string -%}
+                        {{- function['arguments'] -}}
+                    {%- else -%}
+                        {{- function['arguments'] | tojson -}}
+                    {%- endif -%}
+                    {{- '}' -}}
+                {%- endfor -%}
+            {%- endif -%}
+            {{- '<|im_end|>\n' -}}
+        {%- endif -%}
+    {%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+    {{- '<|im_start|>assistant\n' -}}
+{%- endif -%}
